@@ -4,19 +4,20 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/baidu/openedge/logger"
-	"github.com/baidu/openedge/master/engine"
-	openedge "github.com/baidu/openedge/sdk/openedge-go"
+	"github.com/baetyl/baetyl/logger"
+	"github.com/baetyl/baetyl/master/engine"
+	baetyl "github.com/baetyl/baetyl/sdk/baetyl-go"
 	cmap "github.com/orcaman/concurrent-map"
 )
 
 const (
-	fmtVolume   = "%s:/%s"
-	fmtVolumeRO = "%s:/%s:ro"
+	fmtVolumeRW = "%s:%s:rw"
+	fmtVolumeRO = "%s:%s:ro"
 )
 
 type dockerService struct {
-	cfg       openedge.ServiceInfo
+	name      string
+	cfg       baetyl.ComposeService
 	params    containerConfigs
 	engine    *dockerEngine
 	instances cmap.ConcurrentMap
@@ -24,25 +25,25 @@ type dockerService struct {
 }
 
 func (s *dockerService) Name() string {
-	return s.cfg.Name
+	return s.name
 }
 
 func (s *dockerService) Engine() engine.Engine {
 	return s.engine
 }
 
-func (s *dockerService) RestartPolicy() openedge.RestartPolicyInfo {
+func (s *dockerService) RestartPolicy() baetyl.RestartPolicyInfo {
 	return s.cfg.Restart
 }
 
 func (s *dockerService) Start() error {
-	s.log.Debugf("%s replica: %d", s.cfg.Name, s.cfg.Replica)
+	s.log.Debugf("%s replica: %d", s.name, s.cfg.Replica)
 	var instanceName string
 	for i := 0; i < s.cfg.Replica; i++ {
 		if i == 0 {
-			instanceName = s.cfg.Name
+			instanceName = s.name
 		} else {
-			instanceName = fmt.Sprintf("%s.i%d", s.cfg.Name, i)
+			instanceName = fmt.Sprintf("%s.i%d", s.name, i)
 		}
 		err := s.startInstance(instanceName, nil)
 		if err != nil {

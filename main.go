@@ -1,15 +1,10 @@
 package main
 
 import (
-	"github.com/baidu/openedge/cmd"
-	_ "github.com/baidu/openedge/master/engine/docker"
-	_ "github.com/baidu/openedge/master/engine/native"
-)
-
-// compile variables
-var (
-	Version   string
-	GoVersion string
+	"github.com/baetyl/baetyl/cmd"
+	_ "github.com/baetyl/baetyl/master/engine/docker"
+	_ "github.com/baetyl/baetyl/master/engine/native"
+	_ "github.com/mattn/go-sqlite3"
 )
 
 func main() {

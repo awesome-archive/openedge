@@ -3,10 +3,10 @@ package logger
 import (
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/sirupsen/logrus"
 	lumberjack "gopkg.in/natefinch/lumberjack.v2"
@@ -80,8 +80,8 @@ func (l *logger) Fatalln(args ...interface{}) {
 	l.entry.Fatalln(args...)
 }
 
-// InitLogger init global logger
-func InitLogger(c LogInfo, fields ...string) Logger {
+// New create a new logger
+func New(c LogInfo, fields ...string) Logger {
 	logLevel, err := logrus.ParseLevel(c.Level)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to parse log level (%s), use default level (info)", c.Level)
@@ -111,7 +111,6 @@ func InitLogger(c LogInfo, fields ...string) Logger {
 
 	entry := logrus.NewEntry(logrus.New())
 	entry.Level = logLevel
-	entry.Logger.Out = ioutil.Discard
 	entry.Logger.Level = logLevel
 	entry.Logger.Formatter = newFormatter(c.Format)
 	if fileHook != nil {
@@ -121,7 +120,12 @@ func InitLogger(c LogInfo, fields ...string) Logger {
 	for index := 0; index < len(fields)-1; index = index + 2 {
 		logrusFields[fields[index]] = fields[index+1]
 	}
-	Global = &logger{entry.WithFields(logrusFields)}
+	return &logger{entry.WithFields(logrusFields)}
+}
+
+// InitLogger init global logger
+func InitLogger(c LogInfo, fields ...string) Logger {
+	Global = New(c, fields...)
 	return Global
 }
 
@@ -195,9 +199,9 @@ func (hook *fileHook) Fire(entry *logrus.Entry) (err error) {
 func newFormatter(format string) logrus.Formatter {
 	var formatter logrus.Formatter
 	if strings.ToLower(format) == "json" {
-		formatter = &logrus.JSONFormatter{}
+		formatter = &logrus.JSONFormatter{TimestampFormat: time.RFC3339Nano}
 	} else {
-		formatter = &logrus.TextFormatter{FullTimestamp: true, DisableColors: true}
+		formatter = &logrus.TextFormatter{TimestampFormat: time.RFC3339Nano, FullTimestamp: true, DisableColors: true}
 	}
 	return formatter
 }

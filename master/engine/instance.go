@@ -5,7 +5,7 @@ import (
 	"io"
 	"strings"
 
-	openedge "github.com/baidu/openedge/sdk/openedge-go"
+	baetyl "github.com/baetyl/baetyl/sdk/baetyl-go"
 )
 
 // all status
@@ -41,16 +41,20 @@ type Instance interface {
 
 // GenerateInstanceEnv generates new env of the instance
 func GenerateInstanceEnv(name string, static []string, dynamic map[string]string) []string {
-	env := []string{}
+	var env []string
 	dyn := dynamic != nil
 	for _, v := range static {
 		// remove auth token info for dynamic instances
-		if dyn && strings.HasPrefix(v, openedge.EnvServiceTokenKey) {
-			continue
+		if dyn {
+			if strings.HasPrefix(v, baetyl.EnvKeyServiceToken) || strings.HasPrefix(v, baetyl.EnvServiceTokenKey) {
+				continue
+			}
 		}
 		env = append(env, v)
 	}
-	env = append(env, fmt.Sprintf("%s=%s", openedge.EnvServiceInstanceNameKey, name))
+	env = append(env, fmt.Sprintf("%s=%s", baetyl.EnvKeyServiceInstanceName, name))
+	// TODO: remove, backward compatibility
+	env = append(env, fmt.Sprintf("%s=%s", baetyl.EnvServiceInstanceNameKey, name))
 	if dyn {
 		for k, v := range dynamic {
 			env = append(env, fmt.Sprintf("%s=%s", k, v))

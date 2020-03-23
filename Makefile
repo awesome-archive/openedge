@@ -1,258 +1,127 @@
 PREFIX?=/usr/local
-VERSION?=git-$(shell git rev-list HEAD|head -1|cut -c 1-6)
-GOFLAG?=-ldflags "-X 'github.com/baidu/openedge/cmd.GoVersion=`go version`' -X 'github.com/baidu/openedge/cmd.Version=$(VERSION)'"
-DEPLOY_TARGET=agent hub function-manager remote-mqtt timer function-python function-node
+MODE?=docker
+MODULES?=agent hub timer remote-mqtt function-manager function-node8 function-python3 function-python2
+SRC_FILES:=$(shell find main.go cmd master logger sdk protocol utils -type f -name '*.go') # TODO use vpath
+PLATFORM_ALL:=darwin/amd64 linux/amd64 linux/arm64 linux/386 linux/arm/v7 linux/arm/v6 linux/arm/v5 linux/ppc64le linux/s390x
 
-all: openedge package
+GIT_REV:=git-$(shell git rev-parse --short HEAD)
+GIT_TAG:=$(shell git tag --contains HEAD)
+VERSION:=$(if $(GIT_TAG),$(GIT_TAG),$(GIT_REV))
+# CHANGES:=$(if $(shell git status -s),true,false)
 
-package:
-	for target in $(DEPLOY_TARGET) ; do \
-		make openedge-$$target/package.zip;\
-	done
+GO_OS:=$(shell go env GOOS)
+GO_ARCH:=$(shell go env GOARCH)
+GO_ARM:=$(shell go env GOARM)
+GO_FLAGS?=-ldflags "-X 'github.com/baetyl/baetyl/cmd.Revision=$(GIT_REV)' -X 'github.com/baetyl/baetyl/cmd.Version=$(VERSION)'"
+GO_FLAGS_STATIC=-ldflags '-X "github.com/baetyl/baetyl/cmd.Revision=$(GIT_REV)" -X "github.com/baetyl/baetyl/cmd.Version=$(VERSION)"  -linkmode external -w -extldflags "-static"'
+GO_TEST_FLAGS?=-race -short -covermode=atomic -coverprofile=coverage.out
+GO_TEST_PKGS?=$(shell go list ./... | grep -v baetyl-video-infer)
 
-SRC=$(wildcard *.go) $(shell find cmd master logger sdk protocol utils -type f -name '*.go')
+ifndef PLATFORMS
+	GO_OS:=$(shell go env GOOS)
+	GO_ARCH:=$(shell go env GOARCH)
+	GO_ARM:=$(shell go env GOARM)
+	PLATFORMS:=$(if $(GO_ARM),$(GO_OS)/$(GO_ARCH)/$(GO_ARM),$(GO_OS)/$(GO_ARCH))
+	ifeq ($(GO_OS),darwin)
+		PLATFORMS+=linux/amd64
+	endif
+else ifeq ($(PLATFORMS),all)
+	override PLATFORMS:=$(PLATFORM_ALL)
+endif
 
-openedge: $(SRC)
+OUTPUT:=output
+OUTPUT_DIRS:=$(PLATFORMS:%=$(OUTPUT)/%/baetyl)
+OUTPUT_BINS:=$(OUTPUT_DIRS:%=%/bin/baetyl)
+OUTPUT_PKGS:=$(OUTPUT_DIRS:%=%/baetyl-$(VERSION).zip) # TODO: switch to tar
+
+OUTPUT_MODS:=$(MODULES:%=baetyl-%)
+IMAGE_MODS:=$(MODULES:%=image/baetyl-%) # a little tricky to add prefix 'image/' in order to distinguish from OUTPUT_MODS
+NATIVE_MODS:=$(MODULES:%=native/baetyl-%) # a little tricky to add prefix 'native/' in order to distinguish from OUTPUT_MODS
+
+.PHONY: all $(OUTPUT_MODS)
+all: baetyl $(OUTPUT_MODS)
+
+baetyl: $(OUTPUT_BINS) $(OUTPUT_PKGS)
+
+$(OUTPUT_BINS): $(SRC_FILES)
 	@echo "BUILD $@"
-	@go build ${GOFLAG} .
+	@mkdir -p $(dir $@)
+	@# baetyl failed to collect cpu related data on darwin if set 'CGO_ENABLED=0' in compilation
+	@$(shell echo $(@:$(OUTPUT)/%/baetyl/bin/baetyl=%)  | sed 's:/v:/:g' | awk -F '/' '{print "GOOS="$$1" GOARCH="$$2" GOARM="$$3" go build"}') -o $@ ${GO_FLAGS} .
 
-openedge-hub/package.zip:
-	make -C openedge-hub
+$(OUTPUT_PKGS):
+	@echo "PACKAGE $@"
+	@cd $(dir $@) && zip -q -r $(notdir $@) bin 
 
-openedge-agent/package.zip:
-	make -C openedge-agent
+$(OUTPUT_MODS):
+	@${MAKE} -C $@
 
-openedge-remote-mqtt/package.zip:
-	make -C openedge-remote-mqtt
+.PHONY: build
+build: $(SRC_FILES)
+	@echo "BUILD baetyl"
+ifneq ($(GO_OS),darwin)
+	@CGO_ENABLED=1 go build -o baetyl $(GO_FLAGS_STATIC) .
+else
+	@CGO_ENABLED=1 go build -o baetyl $(GO_FLAGS) .
+endif
 
-openedge-function-manager/package.zip:
-	make -C openedge-function-manager
+.PHONY: image $(IMAGE_MODS)
+image: $(IMAGE_MODS) 
 
-openedge-function-python/package.zip:
-	make -C openedge-function-python package27.zip
-	make -C openedge-function-python package36.zip
+$(IMAGE_MODS):
+	@${MAKE} -C $(notdir $@) image
 
-openedge-function-node/package.zip:
-	make -C openedge-function-node package85.zip
-
-openedge-timer/package.zip:
-	make -C openedge-timer
-
-test:
-	go test --race --cover ./...
-
-install: openedge
-	install -d -m 0755 ${PREFIX}/bin
-	install -m 0755 openedge ${PREFIX}/bin/
-	tar cf - -C example/docker etc var | tar xvf - -C ${PREFIX}/
-
-uninstall:
-	rm -f ${PREFIX}/bin/openedge
-	rm -rf ${PREFIX}/etc/openedge
-	rm -rf ${PREFIX}/var/db/openedge
-	rmdir ${PREFIX}/var/db
-	rmdir ${PREFIX}/var
-	rmdir ${PREFIX}/etc
-	rmdir ${PREFIX}/bin
-	rmdir ${PREFIX}
-
-install-native: openedge package
-	install -d -m 0755 ${PREFIX}/bin
-	install -m 0755 openedge ${PREFIX}/bin/
-
-	install -d -m 0755 ${PREFIX}/var/db/openedge/openedge-hub
-	unzip -o openedge-hub/package.zip -d ${PREFIX}/var/db/openedge/openedge-hub
-
-	install -d -m 0755 ${PREFIX}/var/db/openedge/openedge-agent
-	unzip -o openedge-agent/package.zip -d ${PREFIX}/var/db/openedge/openedge-agent
-
-	install -d -m 0755 ${PREFIX}/var/db/openedge/openedge-remote-mqtt
-	unzip -o openedge-remote-mqtt/package.zip -d ${PREFIX}/var/db/openedge/openedge-remote-mqtt
-
-	install -d -m 0755 ${PREFIX}/var/db/openedge/openedge-function-manager
-	unzip -o openedge-function-manager/package.zip -d ${PREFIX}/var/db/openedge/openedge-function-manager
-
-	install -d -m 0755 ${PREFIX}/var/db/openedge/openedge-function-python27
-	unzip -o openedge-function-python/package27.zip -d ${PREFIX}/var/db/openedge/openedge-function-python27
-
-	install -d -m 0755 ${PREFIX}/var/db/openedge/openedge-function-python36
-	unzip -o openedge-function-python/package36.zip -d ${PREFIX}/var/db/openedge/openedge-function-python36
-
-	install -d -m 0755 ${PREFIX}/var/db/openedge/openedge-function-node85
-	unzip -o openedge-function-node/package85.zip -d ${PREFIX}/var/db/openedge/openedge-function-node85
-
-	install -d -m 0755 ${PREFIX}/var/db/openedge/openedge-timer
-	unzip -o openedge-timer/package.zip -d ${PREFIX}/var/db/openedge/openedge-timer
-
-	tar cf - -C example/native etc var | tar xvf - -C ${PREFIX}/
-
-uninstall-native:
-	rm -f ${PREFIX}/bin/openedge
-	rm -rf ${PREFIX}/etc/openedge
-	rm -rf ${PREFIX}/var/db/openedge
-	rmdir ${PREFIX}/var/db
-	rmdir ${PREFIX}/var
-	rmdir ${PREFIX}/etc
-	rmdir ${PREFIX}/bin
-	rmdir ${PREFIX}
-
-.PHONY: clean
-clean:
-	rm -f openedge
-	make -C openedge-hub clean
-	make -C openedge-agent clean
-	make -C openedge-remote-mqtt clean
-	make -C openedge-function-manager clean
-	make -C openedge-function-python clean
-	make -C openedge-function-node clean
-	make -C openedge-timer clean
-
+.PHONY: rebuild
 rebuild: clean all
 
+.PHONY: test
+test:
+	@cd baetyl-function-node8 && npm install && cd -
+	@cd baetyl-function-python2 && pip install -r requirements.txt && cd -
+	@cd baetyl-function-python3 && pip3 install -r requirements.txt && cd -
+	@go test ${GO_TEST_FLAGS} ${GO_TEST_PKGS}
+	@go tool cover -func=coverage.out | grep total
+
+.PHONY: install $(NATIVE_MODS)
+install: all
+	@install -d -m 0755 ${PREFIX}/bin
+	@install -m 0755 $(OUTPUT)/$(if $(GO_ARM),$(GO_OS)/$(GO_ARCH)/$(GO_ARM),$(GO_OS)/$(GO_ARCH))/baetyl/bin/baetyl ${PREFIX}/bin/
+ifeq ($(MODE),native)
+	@${MAKE} $(NATIVE_MODS)
+endif
+	@tar cf - -C example/$(MODE) etc var | tar xvf - -C ${PREFIX}/
+
+$(NATIVE_MODS):
+	@install -d -m 0755 ${PREFIX}/var/db/baetyl/$(notdir $@)/bin
+	@install -m 0755 $(OUTPUT)/$(if $(GO_ARM),$(GO_OS)/$(GO_ARCH)/$(GO_ARM),$(GO_OS)/$(GO_ARCH))/$(notdir $@)/bin/* ${PREFIX}/var/db/baetyl/$(notdir $@)/bin/
+	@install -m 0755 $(OUTPUT)/$(if $(GO_ARM),$(GO_OS)/$(GO_ARCH)/$(GO_ARM),$(GO_OS)/$(GO_ARCH))/$(notdir $@)/package.yml ${PREFIX}/var/db/baetyl/$(notdir $@)/
+	cd ${PREFIX}/var/db/baetyl/$(notdir $@)/bin && npm install
+
+.PHONY: uninstall
+uninstall:
+	@-rm -f ${PREFIX}/bin/baetyl
+	@-rm -rf ${PREFIX}/etc/baetyl
+	@-rm -rf ${PREFIX}/var/db/baetyl
+	@-rm -rf ${PREFIX}/var/log/baetyl
+	@-rm -rf ${PREFIX}/var/run/baetyl
+	@-rmdir ${PREFIX}/bin
+	@-rmdir ${PREFIX}/etc
+	@-rmdir ${PREFIX}/var/db
+	@-rmdir ${PREFIX}/var/log
+	@-rmdir ${PREFIX}/var/run
+	@-rmdir ${PREFIX}/var
+	@-rmdir ${PREFIX}
+
+.PHONY: generate
 generate:
 	go generate ./...
 
-image: clean
-	for target in $(DEPLOY_TARGET) ; do \
-		make -C openedge-$$target image;\
-	done
-
-function-python-image:
-	make -C openedge-function-python image
-
-release: clean release-master release-image push-image release-manifest release-package
-
-release-master: clean
-	# release linux 386
-	env GOOS=linux GOARCH=386 make install PREFIX=__release_build/openedge-linux-386-$(VERSION)
-	tar czf openedge-linux-386-$(VERSION).tar.gz -C __release_build/openedge-linux-386-$(VERSION) bin etc var
-	tar cjf openedge-linux-386-$(VERSION).tar.bz2 -C __release_build/openedge-linux-386-$(VERSION) bin etc var
-	cd __release_build/openedge-linux-386-$(VERSION) && zip -q -r ../../openedge-linux-386-$(VERSION).zip bin/
-	make uninstall clean PREFIX=__release_build/openedge-linux-386-$(VERSION)
-	# release linux amd64
-	env GOOS=linux GOARCH=amd64 make install PREFIX=__release_build/openedge-linux-amd64-$(VERSION)
-	tar czf openedge-linux-amd64-$(VERSION).tar.gz -C __release_build/openedge-linux-amd64-$(VERSION) bin etc var
-	tar cjf openedge-linux-amd64-$(VERSION).tar.bz2 -C __release_build/openedge-linux-amd64-$(VERSION) bin etc var
-	cd __release_build/openedge-linux-amd64-$(VERSION) && zip -q -r ../../openedge-linux-amd64-$(VERSION).zip bin/
-	make uninstall clean PREFIX=__release_build/openedge-linux-amd64-$(VERSION)
-	# release linux arm v7
-	env GOOS=linux GOARCH=arm GOARM=7 make install PREFIX=__release_build/openedge-linux-armv7-$(VERSION)
-	tar czf openedge-linux-armv7-$(VERSION).tar.gz -C __release_build/openedge-linux-armv7-$(VERSION) bin etc var
-	tar cjf openedge-linux-armv7-$(VERSION).tar.bz2 -C __release_build/openedge-linux-armv7-$(VERSION) bin etc var
-	cd __release_build/openedge-linux-armv7-$(VERSION) && zip -q -r ../../openedge-linux-armv7-$(VERSION).zip bin/
-	make uninstall clean PREFIX=__release_build/openedge-linux-armv7-$(VERSION)
-	# release linux arm64
-	env GOOS=linux GOARCH=arm64 make install PREFIX=__release_build/openedge-linux-arm64-$(VERSION)
-	tar czf openedge-linux-arm64-$(VERSION).tar.gz -C __release_build/openedge-linux-arm64-$(VERSION) bin etc var
-	tar cjf openedge-linux-arm64-$(VERSION).tar.bz2 -C __release_build/openedge-linux-arm64-$(VERSION) bin etc var
-	cd __release_build/openedge-linux-arm64-$(VERSION) && zip -q -r ../../openedge-linux-arm64-$(VERSION).zip bin/
-	make uninstall clean PREFIX=__release_build/openedge-linux-arm64-$(VERSION)
-	# release darwin amd64
-	env GOOS=darwin GOARCH=amd64 make all
-	make install PREFIX=__release_build/openedge-darwin-amd64-$(VERSION)
-	tar czf openedge-darwin-amd64-$(VERSION).tar.gz -C __release_build/openedge-darwin-amd64-$(VERSION) bin etc var
-	tar cjf openedge-darwin-amd64-$(VERSION).tar.bz2 -C __release_build/openedge-darwin-amd64-$(VERSION) bin etc var
-	cd __release_build/openedge-darwin-amd64-$(VERSION) && zip -q -r ../../openedge-darwin-amd64-$(VERSION).zip bin/
-	make uninstall PREFIX=__release_build/openedge-darwin-amd64-$(VERSION)
-	make install-native PREFIX=__release_build/openedge-darwin-amd64-$(VERSION)-native
-	tar czf openedge-darwin-amd64-$(VERSION)-native.tar.gz -C __release_build/openedge-darwin-amd64-$(VERSION)-native bin etc var
-	tar cjf openedge-darwin-amd64-$(VERSION)-native.tar.bz2 -C __release_build/openedge-darwin-amd64-$(VERSION)-native bin etc var
-	make uninstall-native PREFIX=__release_build/openedge-darwin-amd64-$(VERSION)-native
-	make clean
-	# at last
-	rmdir __release_build
-
-release-image: clean
-	# linux-amd64 images release
-	env GOOS=linux GOARCH=amd64 make image IMAGE_SUFFIX="-linux-amd64"
-	make clean
-	# linux-386 images release
-	env GOOS=linux GOARCH=386 make image IMAGE_SUFFIX="-linux-386"
-	make clean
-	# linux-arm images release
-	env GOOS=linux GOARCH=arm GOARM=7 make image IMAGE_SUFFIX="-linux-armv7"
-	make clean
-	# linux-arm64 images release
-	env GOOS=linux GOARCH=arm64 make image IMAGE_SUFFIX="-linux-arm64"
-	make clean
-
-release-manifest:
-	rm -rf tmp
-	mkdir tmp
-	for target in $(DEPLOY_TARGET) ; do \
-		sed "s/__REGISTRY__/$(REGISTRY)/g; s/__NAMESPACE__/$(NAMESPACE)/g; s/__VERSION__/$(VERSION)/g;" openedge-$$target/manifest.yml.template > tmp/manifest-$$target-$(VERSION).yml;\
-		./bin/manifest-tool-linux-amd64 --username=$(USERNAME) --password=$(PASSWORD) push from-spec tmp/manifest-$$target-$(VERSION).yml;\
-		sed "s/__REGISTRY__/$(REGISTRY)/g; s/__NAMESPACE__/$(NAMESPACE)/g; s/__VERSION__/latest/g;" openedge-$$target/manifest.yml.template > tmp/manifest-$$target-latest.yml;\
-		./bin/manifest-tool-linux-amd64 --username=$(USERNAME) --password=$(PASSWORD) push from-spec tmp/manifest-$$target-latest.yml;\
-	done
-	rm -rf tmp
+.PHONY: clean
+clean:
+	@-rm -rf ./baetyl-function-node8/node_modules
+	@-rm -rf $(OUTPUT)
 
 
-# You need build the function-builder image at different platforms and push them to the hub first
-release-builder-manifest:
-	mkdir tmp
-
-	# Push openedge-python27-builder manifest version
-	sed "s/__REGISTRY__/$(REGISTRY)/g; s/__NAMESPACE__/$(NAMESPACE)/g; s/__VERSION__/$(VERSION)/g;" openedge-function-python/manifest-python27-builder.yml.template > tmp/manifest-python27-builder-$(VERSION).yml
-	./bin/manifest-tool-linux-amd64 --username=$(USERNAME) --password=$(PASSWORD) push from-spec tmp/manifest-python27-builder-$(VERSION).yml
-	# Push openedge-python27-builder manifest latest
-	sed "s/__REGISTRY__/$(REGISTRY)/g; s/__NAMESPACE__/$(NAMESPACE)/g; s/__VERSION__/latest/g;" openedge-function-python/manifest-python27-builder.yml.template > tmp/manifest-python27-builder-latest.yml
-	./bin/manifest-tool-linux-amd64 --username=$(USERNAME) --password=$(PASSWORD) push from-spec tmp/manifest-python27-builder-latest.yml
-	# Push openedge-python36-builder manifest version
-	sed "s/__REGISTRY__/$(REGISTRY)/g; s/__NAMESPACE__/$(NAMESPACE)/g; s/__VERSION__/$(VERSION)/g;" openedge-function-python/manifest-python36-builder.yml.template > tmp/manifest-python36-builder-$(VERSION).yml
-	./bin/manifest-tool-linux-amd64 --username=$(USERNAME) --password=$(PASSWORD) push from-spec tmp/manifest-python36-builder-$(VERSION).yml
-	# Push openedge-python36-builder manifest latest
-	sed "s/__REGISTRY__/$(REGISTRY)/g; s/__NAMESPACE__/$(NAMESPACE)/g; s/__VERSION__/latest/g;" openedge-function-python/manifest-python36-builder.yml.template > tmp/manifest-python36-builder-latest.yml
-	./bin/manifest-tool-linux-amd64 --username=$(USERNAME) --password=$(PASSWORD) push from-spec tmp/manifest-python36-builder-latest.yml
-	# Push openedge-node85-builder manifest version
-	sed "s/__REGISTRY__/$(REGISTRY)/g; s/__NAMESPACE__/$(NAMESPACE)/g; s/__VERSION__/$(VERSION)/g;" openedge-function-node/manifest-node85-builder.yml.template > tmp/manifest-node85-builder-$(VERSION).yml
-	./bin/manifest-tool-linux-amd64 --username=$(USERNAME) --password=$(PASSWORD) push from-spec tmp/manifest-node85-builder-$(VERSION).yml
-	# Push openedge-node85-builder manifest latest
-	sed "s/__REGISTRY__/$(REGISTRY)/g; s/__NAMESPACE__/$(NAMESPACE)/g; s/__VERSION__/latest/g;" openedge-function-node/manifest-node85-builder.yml.template > tmp/manifest-node85-builder-latest.yml
-	./bin/manifest-tool-linux-amd64 --username=$(USERNAME) --password=$(PASSWORD) push from-spec tmp/manifest-node85-builder-latest.yml
-
-	rm -rf tmp
-
-release-package: clean
-	# Release modules' package -- linux armv7
-	env GOOS=linux GOARCH=arm GOARM=7 make package
-	for target in $(DEPLOY_TARGET) ; do \
-		mv openedge-$$target/package.zip ./openedge-$$target-linux-armv7-$(VERSION).zip;\
-	done
-	make clean
-	# Release modules' package -- linux amd64
-	env GOOS=linux GOARCH=amd64 make package
-	for target in $(DEPLOY_TARGET); do \
-		mv openedge-$$target/package.zip ./openedge-$$target-linux-amd64-$(VERSION).zip;\
-	done
-	make clean
-	# Release modules' package -- linux arm64
-	env GOOS=linux GOARCH=arm64 make package
-	for target in $(DEPLOY_TARGET); do \
-		mv openedge-$$target/package.zip ./openedge-$$target-linux-arm64-$(VERSION).zip;\
-	done
-	make clean
-	# Release modules' package -- linux 386
-	env GOOS=linux GOARCH=386 make package
-	for target in $(DEPLOY_TARGET); do \
-		mv openedge-$$target/package.zip ./openedge-$$target-linux-386-$(VERSION).zip;\
-	done
-	make clean
-	# Release modules' package -- darwin amd64
-	env GOOS=darwin GOARCH=amd64 make package
-	for target in $(DEPLOY_TARGET); do \
-		mv openedge-$$target/package.zip ./openedge-$$target-darwin-amd64-$(VERSION).zip;\
-	done
-	make clean
-
-push-image:
-	for target in $(DEPLOY_TARGET); do \
-		docker tag $(IMAGE_PREFIX)openedge-$$target-linux-amd64:latest $(IMAGE_PREFIX)openedge-$$target-linux-amd64:$(VERSION);\
-		docker tag $(IMAGE_PREFIX)openedge-$$target-linux-arm64:latest $(IMAGE_PREFIX)openedge-$$target-linux-arm64:$(VERSION);\
-		docker tag $(IMAGE_PREFIX)openedge-$$target-linux-armv7:latest $(IMAGE_PREFIX)openedge-$$target-linux-armv7:$(VERSION);\
-		docker tag $(IMAGE_PREFIX)openedge-$$target-linux-386:latest $(IMAGE_PREFIX)openedge-$$target-linux-386:$(VERSION);\
-		docker push $(IMAGE_PREFIX)openedge-$$target-linux-amd64;\
-		docker push $(IMAGE_PREFIX)openedge-$$target-linux-arm64;\
-		docker push $(IMAGE_PREFIX)openedge-$$target-linux-armv7;\
-		docker push $(IMAGE_PREFIX)openedge-$$target-linux-386;\
-	done
+.PHONY: fmt
+fmt:
+	go fmt  ./...

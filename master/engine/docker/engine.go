@@ -8,16 +8,16 @@ import (
 	"sync"
 	"time"
 
-	"github.com/baidu/openedge/logger"
-	"github.com/baidu/openedge/master/engine"
-	openedge "github.com/baidu/openedge/sdk/openedge-go"
-	"github.com/baidu/openedge/utils"
+	"github.com/baetyl/baetyl/logger"
+	"github.com/baetyl/baetyl/master/engine"
+	baetyl "github.com/baetyl/baetyl/sdk/baetyl-go"
+	"github.com/baetyl/baetyl/utils"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/sysinfo"
 	"github.com/docker/go-connections/nat"
-	"github.com/orcaman/concurrent-map"
+	cmap "github.com/orcaman/concurrent-map"
 )
 
 // NAME ot docker engine
@@ -28,44 +28,46 @@ func init() {
 }
 
 // New docker engine
-func New(grace time.Duration, pwd string, stats engine.InfoStats) (engine.Engine, error) {
-	cli, err := client.NewEnvClient()
+func New(stats engine.InfoStats, opts engine.Options) (engine.Engine, error) {
+	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithVersion(opts.APIVersion))
 	if err != nil {
 		return nil, err
 	}
 	e := &dockerEngine{
 		InfoStats: stats,
 		cli:       cli,
-		pwd:       pwd,
-		grace:     grace,
+		networks:  make(map[string]string),
+		pwd:       opts.Pwd,
+		grace:     opts.Grace,
 		log:       logger.WithField("engine", NAME),
-	}
-	e.clean()
-	err = e.initNetwork()
-	if err != nil {
-		e.Close()
-		return nil, err
 	}
 	return e, nil
 }
 
 type dockerEngine struct {
 	engine.InfoStats
-	cli   *client.Client
-	nid   string // network id
-	pwd   string // work directory
-	grace time.Duration
-	tomb  utils.Tomb
-	log   logger.Logger
+	cli      *client.Client
+	networks map[string]string
+	pwd      string // work directory
+	grace    time.Duration
+	tomb     utils.Tomb
+	log      logger.Logger
 }
 
 func (e *dockerEngine) Name() string {
 	return NAME
 }
 
+// Recover recover old services when master restart
+func (e *dockerEngine) Recover() {
+	// clean old services in docker mode
+	e.clean()
+}
+
 // Prepare prepares all images
-func (e *dockerEngine) Prepare(ss []openedge.ServiceInfo) {
+func (e *dockerEngine) Prepare(cfg baetyl.ComposeAppConfig) {
 	var wg sync.WaitGroup
+	ss := cfg.Services
 	for _, s := range ss {
 		wg.Add(1)
 		go func(i string, w *sync.WaitGroup) {
@@ -73,10 +75,21 @@ func (e *dockerEngine) Prepare(ss []openedge.ServiceInfo) {
 			e.pullImage(i)
 		}(s.Image, &wg)
 	}
+	wg.Add(1)
+	go func(nw map[string]baetyl.ComposeNetwork, w *sync.WaitGroup) {
+		defer w.Done()
+		e.initNetworks(nw)
+	}(cfg.Networks, &wg)
+
+	wg.Add(1)
+	go func(vs map[string]baetyl.ComposeVolume, w *sync.WaitGroup) {
+		defer w.Done()
+		e.initVolumes(vs)
+	}(cfg.Volumes, &wg)
 	wg.Wait()
 }
 
-// Clean clean all old instances
+// Clean recover all old instances
 func (e *dockerEngine) clean() {
 	sss := map[string]map[string]attribute{}
 	if e.LoadStats(&sss) {
@@ -105,30 +118,35 @@ func (e *dockerEngine) clean() {
 }
 
 // Run a new service
-func (e *dockerEngine) Run(cfg openedge.ServiceInfo, vs map[string]openedge.VolumeInfo) (engine.Service, error) {
-
+func (e *dockerEngine) Run(name string, cfg baetyl.ComposeService, vs map[string]baetyl.ComposeVolume) (engine.Service, error) {
 	if runtime.GOOS == "linux" && cfg.Resources.CPU.Cpus > 0 {
 		sysInfo := sysinfo.New(true)
 		if !sysInfo.CPUCfsPeriod || !sysInfo.CPUCfsQuota {
-			e.log.Warnf("configuration 'resources.cpu.cpus' of service (%s) is ignored, because host kernel does not support CPU cfs period/quota or the cgroup is not mounted.", cfg.Name)
+			e.log.Warnf("configuration 'resources.cpu.cpus' of service (%s) is ignored, because host kernel does not support CPU cfs period/quota or the cgroup is not mounted.", name)
 			cfg.Resources.CPU.Cpus = 0
 		}
 	}
-
-	volumes := make([]string, 0)
-	for _, m := range cfg.Mounts {
-		v, ok := vs[m.Name]
-		if !ok {
-			return nil, fmt.Errorf("volume '%s' not found", m.Name)
+	binds := make([]string, 0)
+	volumes := map[string]struct{}{}
+	for _, m := range cfg.Volumes {
+		if _, ok := vs[m.Source]; !ok {
+			if m.Type == "volume" {
+				return nil, fmt.Errorf("volume '%s' not found", m.Source)
+			}
+			// for preventing path escape
+			m.Source = path.Join(e.pwd, path.Join("/", m.Source))
 		}
-		f := fmtVolume
+		f := fmtVolumeRW
 		if m.ReadOnly {
 			f = fmtVolumeRO
 		}
-		volumes = append(volumes, fmt.Sprintf(f, path.Join(e.pwd, path.Clean(v.Path)), path.Clean(m.Path)))
+		binds = append(binds, fmt.Sprintf(f, m.Source, path.Clean(m.Target)))
+		volumes[m.Target] = struct{}{}
 	}
-	if runtime.GOOS == "linux" {
-		volumes = append(volumes, fmt.Sprintf(fmtVolumeRO, openedge.DefaultSockFile, openedge.DefaultSockFile))
+
+	sock := utils.GetEnv(baetyl.EnvKeyMasterAPISocket)
+	if sock != "" {
+		binds = append(binds, fmt.Sprintf(fmtVolumeRO, sock, path.Join("/", baetyl.DefaultSockFile)))
 	}
 	exposedPorts, portBindings, err := nat.ParsePortSpecs(cfg.Ports)
 	if err != nil {
@@ -141,39 +159,62 @@ func (e *dockerEngine) Run(cfg openedge.ServiceInfo, vs map[string]openedge.Volu
 	var params containerConfigs
 	params.config = container.Config{
 		Image:        strings.TrimSpace(cfg.Image),
-		Env:          utils.AppendEnv(cfg.Env, false),
-		Cmd:          cfg.Args,
+		Env:          utils.AppendEnv(cfg.Environment.Envs, false),
+		Hostname:     cfg.Hostname,
 		ExposedPorts: exposedPorts,
-		Labels:       map[string]string{"openedge": "openedge", "service": cfg.Name},
+		Volumes:      volumes,
+		Labels:       map[string]string{"baetyl": "baetyl", "service": name},
+	}
+	if len(cfg.Command.Cmd) != 0 {
+		params.config.Cmd = cfg.Command.Cmd
+	}
+	if len(cfg.Entrypoint.Entry) != 0 {
+		params.config.Entrypoint = cfg.Entrypoint.Entry
+	}
+	endpointsConfig := map[string]*network.EndpointSettings{}
+	if cfg.NetworkMode != "" {
+		if len(cfg.Networks.ServiceNetworks) > 0 {
+			return nil, fmt.Errorf("'network_mode' and 'networks' cannot be combined")
+		}
+	} else {
+		for networkName, networkInfo := range cfg.Networks.ServiceNetworks {
+			cfg.NetworkMode = networkName
+			endpointsConfig[networkName] = &network.EndpointSettings{
+				NetworkID: e.networks[networkName],
+				Aliases:   networkInfo.Aliases,
+				IPAddress: networkInfo.Ipv4Address,
+			}
+		}
+		if cfg.NetworkMode == "" {
+			cfg.NetworkMode = defaultNetworkName
+		}
+	}
+	params.networkConfig = network.NetworkingConfig{
+		EndpointsConfig: endpointsConfig,
 	}
 	params.hostConfig = container.HostConfig{
-		Binds:        volumes,
+		Binds:        binds,
 		Runtime:      cfg.Runtime,
 		PortBindings: portBindings,
-		// container is supervised by openedge,
+		NetworkMode:  container.NetworkMode(cfg.NetworkMode),
+		// container is supervised by baetyl,
 		RestartPolicy: container.RestartPolicy{Name: "no"},
 		Resources: container.Resources{
 			CpusetCpus: cfg.Resources.CPU.SetCPUs,
 			NanoCPUs:   int64(cfg.Resources.CPU.Cpus * 1e9),
 			Memory:     cfg.Resources.Memory.Limit,
 			MemorySwap: cfg.Resources.Memory.Swap,
-			PidsLimit:  cfg.Resources.Pids.Limit,
+			PidsLimit:  &cfg.Resources.Pids.Limit,
 			Devices:    deviceBindings,
 		},
 	}
-	params.networkConfig = network.NetworkingConfig{
-		EndpointsConfig: map[string]*network.EndpointSettings{
-			defaultNetworkName: &network.EndpointSettings{
-				NetworkID: e.nid,
-			},
-		},
-	}
 	s := &dockerService{
+		name:      name,
 		cfg:       cfg,
 		engine:    e,
 		params:    params,
 		instances: cmap.New(),
-		log:       e.log.WithField("service", cfg.Name),
+		log:       e.log.WithField("service", name),
 	}
 	err = s.Start()
 	if err != nil {

@@ -1,6 +1,7 @@
 package master
 
 import (
+	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -8,34 +9,35 @@ import (
 	"sync"
 	"time"
 
-	"github.com/baidu/openedge/logger"
-	"github.com/baidu/openedge/master/engine"
-	openedge "github.com/baidu/openedge/sdk/openedge-go"
-	"github.com/baidu/openedge/utils"
+	"github.com/baetyl/baetyl/logger"
+	"github.com/baetyl/baetyl/master/engine"
+	baetyl "github.com/baetyl/baetyl/sdk/baetyl-go"
+	"github.com/baetyl/baetyl/utils"
 	"gopkg.in/yaml.v2"
 )
 
 type infoStats struct {
-	openedge.Inspect
+	baetyl.Inspect
 	services engine.ServicesStats
 	file     string
 	sync.RWMutex
 }
 
-func newInfoStats(pwd, mode, version, file string) *infoStats {
+func newInfoStats(pwd, mode, version, revision, file string) *infoStats {
 	return &infoStats{
 		file:     file,
 		services: engine.ServicesStats{},
-		Inspect: openedge.Inspect{
-			Software: openedge.Software{
-				OS:         runtime.GOOS,
-				Arch:       runtime.GOARCH,
-				GoVersion:  runtime.Version(),
-				PWD:        pwd,
-				Mode:       mode,
-				BinVersion: version,
+		Inspect: baetyl.Inspect{
+			Software: baetyl.Software{
+				OS:          runtime.GOOS,
+				Arch:        runtime.GOARCH,
+				GoVersion:   runtime.Version(),
+				PWD:         pwd,
+				Mode:        mode,
+				BinVersion:  version,
+				GitRevision: revision,
 			},
-			Hardware: openedge.Hardware{
+			Hardware: baetyl.Hardware{
 				HostInfo: utils.GetHostInfo(),
 				NetInfo:  utils.GetNetInfo(),
 			},
@@ -126,10 +128,10 @@ func (is *infoStats) getError() string {
 	return is.Inspect.Error
 }
 
-// func genVolumesStats(cfg []openedge.VolumeInfo) openedge.Volumes {
-// 	volumes := openedge.Volumes{}
+// func genVolumesStats(cfg []baetyl.VolumeInfo) baetyl.Volumes {
+// 	volumes := baetyl.Volumes{}
 // 	for _, item := range cfg {
-// 		volumes = append(volumes, openedge.VolumeStatus{
+// 		volumes = append(volumes, baetyl.VolumeStatus{
 // 			Name:    item.Name,
 // 			Version: item.Meta.Version,
 // 		})
@@ -184,8 +186,24 @@ func (is *infoStats) stats() {
 	is.Unlock()
 }
 
-// InspectSystem inspects info and stats of openedge system
-func (m *Master) InspectSystem() *openedge.Inspect {
+func (is *infoStats) serializeStats() ([]byte, error) {
+	is.Lock()
+	defer is.Unlock()
+
+	result := is.Inspect
+	result.Services = baetyl.Services{}
+	for serviceName, serviceStats := range is.services {
+		service := baetyl.NewServiceStatus(serviceName)
+		for _, instanceStats := range serviceStats {
+			service.Instances = append(service.Instances, map[string]interface{}(instanceStats))
+		}
+		result.Services = append(result.Services, service)
+	}
+	return json.Marshal(result)
+}
+
+// InspectSystem inspects info and stats of baetyl system
+func (m *Master) InspectSystem() ([]byte, error) {
 	defer utils.Trace("InspectSystem", logger.Global.Debugf)()
 	var wg sync.WaitGroup
 	for item := range m.services.IterBuffered() {
@@ -202,14 +220,5 @@ func (m *Master) InspectSystem() *openedge.Inspect {
 	}()
 	wg.Wait()
 
-	result := m.infostats.Inspect
-	result.Services = openedge.Services{}
-	for serviceName, serviceStats := range m.infostats.services {
-		service := openedge.NewServiceStatus(serviceName)
-		for _, instanceStats := range serviceStats {
-			service.Instances = append(service.Instances, map[string]interface{}(instanceStats))
-		}
-		result.Services = append(result.Services, service)
-	}
-	return &result
+	return m.infostats.serializeStats()
 }

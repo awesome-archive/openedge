@@ -10,7 +10,7 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/baidu/openedge/utils"
+	"github.com/baetyl/baetyl/utils"
 	"github.com/creasty/defaults"
 	"github.com/docker/go-connections/sockets"
 )
@@ -47,9 +47,12 @@ func NewClient(c ClientInfo) (*Client, error) {
 		if err != nil {
 			return nil, err
 		}
-		sockets.ConfigureTransport(transport, url.Scheme, url.Host)
+		err = sockets.ConfigureTransport(transport, url.Scheme, url.Host)
+		if err != nil {
+			return nil, err
+		}
 		if url.Scheme == "unix" {
-			url.Host = "openedge"
+			url.Host = "baetyl"
 		}
 		if url.Scheme != "http" && url.Scheme != "https" {
 			url.Scheme = "http"

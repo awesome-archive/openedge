@@ -6,8 +6,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/baidu/openedge/master/engine"
-	"github.com/baidu/openedge/utils"
+	"github.com/baetyl/baetyl/master/engine"
+	"github.com/baetyl/baetyl/utils"
 	"github.com/shirou/gopsutil/process"
 )
 
@@ -55,7 +55,7 @@ func (e *nativeEngine) waitProcess(p *os.Process) error {
 }
 
 func (e *nativeEngine) stopProcess(p *os.Process) error {
-	e.log.Debugf("to stop process (%d)", p.Pid)
+	e.log.Debugf("process (%d) is stopping", p.Pid)
 
 	err := p.Signal(syscall.SIGTERM)
 	if err != nil {

@@ -1,21 +1,23 @@
 package cmd
 
 import (
-	"log"
+	"fmt"
+	"runtime"
 
+	"github.com/baetyl/baetyl/utils"
 	"github.com/spf13/cobra"
 )
 
 // Compile parameter
 var (
-	Version   string
-	GoVersion string
+	Version  string
+	Revision string
 )
 
 // versionCmd represents the version command
 var versionCmd = &cobra.Command{
 	Use:   "version",
-	Short: "Show the OpenEdge version information",
+	Short: "show the version of baetyl",
 	Long:  ``,
 	Run:   version,
 }
@@ -25,7 +27,5 @@ func init() {
 }
 
 func version(cmd *cobra.Command, args []string) {
-	log.Printf("\nOpenEdge version %s\n%s\n\n",
-		Version,
-		GoVersion)
+	fmt.Printf("Version:      %s\nGit revision: %s\nGo version:   %s\nPlatform:     %s\n\n", Version, Revision, runtime.Version(), utils.GetHostInfo().FormatPlatformInfo())
 }

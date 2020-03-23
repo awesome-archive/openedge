@@ -7,11 +7,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/baidu/openedge/logger"
-	"github.com/baidu/openedge/master/engine"
-	openedge "github.com/baidu/openedge/sdk/openedge-go"
-	"github.com/baidu/openedge/utils"
-	"github.com/orcaman/concurrent-map"
+	"github.com/baetyl/baetyl/logger"
+	"github.com/baetyl/baetyl/master/engine"
+	baetyl "github.com/baetyl/baetyl/sdk/baetyl-go"
+	"github.com/baetyl/baetyl/utils"
+	cmap "github.com/orcaman/concurrent-map"
 	"github.com/shirou/gopsutil/process"
 )
 
@@ -23,14 +23,13 @@ func init() {
 }
 
 // New native engine
-func New(grace time.Duration, pwd string, stats engine.InfoStats) (engine.Engine, error) {
+func New(stats engine.InfoStats, opts engine.Options) (engine.Engine, error) {
 	e := &nativeEngine{
 		InfoStats: stats,
-		pwd:       pwd,
-		grace:     grace,
+		pwd:       opts.Pwd,
+		grace:     opts.Grace,
 		log:       logger.WithField("engine", NAME),
 	}
-	e.clean()
 	return e, nil
 }
 
@@ -46,8 +45,14 @@ func (e *nativeEngine) Name() string {
 	return NAME
 }
 
+// Recover recover old services when master restart
+func (e *nativeEngine) Recover() {
+	// clean old services in native mode
+	e.clean()
+}
+
 // Prepare prepares all images
-func (e *nativeEngine) Prepare([]openedge.ServiceInfo) {
+func (e *nativeEngine) Prepare(baetyl.ComposeAppConfig) {
 	// do nothing in native mode
 }
 
@@ -89,16 +94,20 @@ func (e *nativeEngine) clean() {
 }
 
 // Run new service
-func (e *nativeEngine) Run(cfg openedge.ServiceInfo, vs map[string]openedge.VolumeInfo) (engine.Service, error) {
-	spwd := path.Join(e.pwd, "var", "run", "openedge", "services", cfg.Name)
-	err := mount(e.pwd, spwd, cfg.Mounts, vs)
+func (e *nativeEngine) Run(name string, cfg baetyl.ComposeService, _ map[string]baetyl.ComposeVolume) (engine.Service, error) {
+	spwd := path.Join(e.pwd, "var", "run", "baetyl", "services", name)
+	err := os.RemoveAll(spwd)
+	if err != nil {
+		return nil, err
+	}
+	err = mountAll(e.pwd, spwd, cfg.Volumes)
 	if err != nil {
 		os.RemoveAll(spwd)
 		return nil, err
 	}
 	var pkg packageConfig
 	image := strings.Replace(strings.TrimSpace(cfg.Image), ":", "/", -1)
-	pkgDir := path.Join(spwd, "lib", "openedge", image)
+	pkgDir := path.Join(spwd, "lib", "baetyl", image)
 	err = utils.LoadYAML(path.Join(pkgDir, packageConfigPath), &pkg)
 	if err != nil {
 		os.RemoveAll(spwd)
@@ -106,16 +115,17 @@ func (e *nativeEngine) Run(cfg openedge.ServiceInfo, vs map[string]openedge.Volu
 	}
 	params := processConfigs{
 		exec: path.Join(pkgDir, pkg.Entry),
-		env:  utils.AppendEnv(cfg.Env, true),
-		argv: cfg.Args,
+		env:  utils.AppendEnv(cfg.Environment.Envs, true),
+		argv: cfg.Command.Cmd,
 		pwd:  spwd,
 	}
 	s := &nativeService{
+		name:      name,
 		cfg:       cfg,
 		engine:    e,
 		params:    params,
 		instances: cmap.New(),
-		log:       e.log.WithField("service", cfg.Name),
+		log:       e.log.WithField("service", name),
 	}
 	err = s.Start()
 	if err != nil {
@@ -130,30 +140,37 @@ func (e *nativeEngine) Close() error {
 	return nil
 }
 
-func mount(epwd, spwd string, ms []openedge.MountInfo, vs map[string]openedge.VolumeInfo) error {
+func mountAll(epwd, spwd string, ms []baetyl.ServiceVolume) error {
 	for _, m := range ms {
-		v, ok := vs[m.Name]
-		if !ok {
-			return fmt.Errorf("volume '%s' not found", m.Name)
+		if len(m.Source) == 0 {
+			return fmt.Errorf("host path is empty")
 		}
-		src := path.Join(epwd, path.Clean(v.Path))
-		err := os.MkdirAll(src, 0755)
-		if err != nil {
-			return err
-		}
-		dst := path.Join(spwd, path.Clean(strings.TrimSpace(m.Path)))
-		err = os.MkdirAll(path.Dir(dst), 0755)
-		if err != nil {
-			return err
-		}
-		err = os.RemoveAll(dst)
-		if err != nil {
-			return err
-		}
-		err = os.Symlink(src, dst)
+		// for preventing path escape
+		m.Source = path.Join(epwd, path.Join("/", m.Source))
+		err := mount(m.Source, path.Join(spwd, strings.TrimSpace(m.Target)))
 		if err != nil {
 			return err
 		}
 	}
+	sock := utils.GetEnv(baetyl.EnvKeyMasterAPISocket)
+	if sock != "" {
+		return mount(sock, path.Join(spwd, baetyl.DefaultSockFile))
+	}
 	return nil
+}
+
+func mount(src, dst string) error {
+	// if it is a file mapping, the file must exist, otherwise it
+	// will be used as a dir mapping and make the dir.
+	if !utils.PathExists(src) {
+		err := os.MkdirAll(src, 0755)
+		if err != nil {
+			return err
+		}
+	}
+	err := os.MkdirAll(path.Dir(dst), 0755)
+	if err != nil {
+		return err
+	}
+	return os.Symlink(src, dst)
 }

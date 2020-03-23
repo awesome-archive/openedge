@@ -1,23 +1,34 @@
 package docker
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"io/ioutil"
+	"reflect"
 	"runtime"
 	"time"
 
-	"github.com/baidu/openedge/master/engine"
-	"github.com/baidu/openedge/utils"
+	"github.com/baetyl/baetyl/master/engine"
+	"github.com/baetyl/baetyl/sdk/baetyl-go"
+	"github.com/baetyl/baetyl/utils"
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/network"
+	volumetypes "github.com/docker/docker/api/types/volume"
+	"github.com/docker/docker/pkg/stdcopy"
 )
 
-const defaultNetworkName = "openedge"
+const defaultNetworkName = "baetyl"
+
+// ComposeNetworks alias of map[string]baetyl.ComposeNetwork
+type ComposeNetworks map[string]baetyl.ComposeNetwork
+
+// ComposeVolumes alias of map[string]baetyl.ComposeVolume
+type ComposeVolumes map[string]baetyl.ComposeVolume
 
 type containerConfigs struct {
 	config        container.Config
@@ -25,32 +36,135 @@ type containerConfigs struct {
 	networkConfig network.NetworkingConfig
 }
 
-func (e *dockerEngine) initNetwork() error {
+func (e *dockerEngine) initVolumes(volumeInfos ComposeVolumes) error {
 	ctx := context.Background()
 	args := filters.NewArgs()
-	args.Add("driver", "bridge")
+	args.Add("label", "baetyl=baetyl")
+	vlBody, err := e.cli.VolumeList(ctx, args)
+	if err != nil {
+		e.log.WithError(err).Errorf("failed to list volumes")
+	}
+	if vlBody.Warnings != nil {
+		e.log.Warnln(vlBody.Warnings)
+	}
+	vsMap := map[string]*types.Volume{}
+	for _, v := range vlBody.Volumes {
+		vsMap[v.Name] = v
+	}
+	for name, volumeInfo := range volumeInfos {
+		volumeInfo.Labels["baetyl"] = "baetyl"
+		if vl, ok := vsMap[name]; ok {
+			t := baetyl.ComposeVolume{
+				Driver:     vl.Driver,
+				DriverOpts: vl.Options,
+				Labels:     vl.Labels,
+			}
+			// it is recommanded to add version info into volume name to avoid duplicate name conflict
+			if !reflect.DeepEqual(t, volumeInfo) {
+				return fmt.Errorf("volume (%s) with different properties exists", name)
+			}
+			e.log.Debugf("volume %s already exists", name)
+			continue
+		}
+		volumeParams := volumetypes.VolumeCreateBody{
+			Name:       name,
+			Driver:     volumeInfo.Driver,
+			DriverOpts: volumeInfo.DriverOpts,
+			Labels:     volumeInfo.Labels,
+		}
+		_, err := e.cli.VolumeCreate(ctx, volumeParams)
+		if err != nil {
+			e.log.WithError(err).Errorf("failed to create volume %s", name)
+		}
+		e.log.Debugf("volume %s created", name)
+	}
+	return nil
+}
+
+func (e *dockerEngine) initNetworks(networks ComposeNetworks) error {
+	ctx := context.Background()
+	args := filters.NewArgs()
 	args.Add("type", "custom")
-	args.Add("name", defaultNetworkName)
+	args.Add("label", "baetyl=baetyl")
 	nws, err := e.cli.NetworkList(ctx, types.NetworkListOptions{Filters: args})
 	if err != nil {
-		e.log.WithError(err).Errorf("failed to list network (%s)", defaultNetworkName)
+		e.log.WithError(err).Errorf("failed to list custom networks")
 		return err
 	}
-	if len(nws) > 0 {
-		e.nid = nws[0].ID
-		e.log.Debugf("network (%s:%s) exists", e.nid[:12], defaultNetworkName)
-		return nil
+	nwMap := map[string]types.NetworkResource{}
+	for _, val := range nws {
+		nwMap[val.Name] = val
 	}
-	nw, err := e.cli.NetworkCreate(ctx, defaultNetworkName, types.NetworkCreate{Driver: "bridge", Scope: "local"})
+	if networks == nil {
+		networks = make(map[string]baetyl.ComposeNetwork)
+	}
+	// add baetyl as default network
+	driver := "bridge"
+	if runtime.GOOS == "windows" {
+		driver = "nat"
+	}
+	networks[defaultNetworkName] = baetyl.ComposeNetwork{
+		Driver:     driver,
+		DriverOpts: make(map[string]string),
+		Labels:     make(map[string]string),
+	}
+	for networkName, network := range networks {
+		network.Labels["baetyl"] = "baetyl"
+		if nw, ok := nwMap[networkName]; ok {
+			t := baetyl.ComposeNetwork{
+				Driver:     nw.Driver,
+				DriverOpts: nw.Options,
+				Labels:     nw.Labels,
+			}
+			// it is recommanded to add version info into network name to avoid duplicate name conflict
+			if !reflect.DeepEqual(t, network) {
+				e.log.Warnf("network (%s:%s) exists with different properties", nw.ID[:12], networkName)
+			}
+			e.networks[networkName] = nw.ID
+			e.log.Debugf("network (%s:%s) exists", nw.ID[:12], networkName)
+		} else {
+			networkParams := types.NetworkCreate{
+				Driver:  network.Driver,
+				Options: network.DriverOpts,
+				Scope:   "local",
+				Labels:  network.Labels,
+			}
+			nw, err := e.cli.NetworkCreate(ctx, networkName, networkParams)
+			if err != nil {
+				e.log.WithError(err).Errorf("failed to create network (%s)", networkName)
+				return err
+			}
+			if nw.Warning != "" {
+				e.log.Warnf(nw.Warning)
+			}
+			e.networks[networkName] = nw.ID
+			e.log.Debugf("network (%s:%s) created", e.networks[networkName][:12], networkName)
+		}
+	}
+	return nil
+}
+
+func (e *dockerEngine) connectNetworks(ctx context.Context, endpointSettings map[string]*network.EndpointSettings, containerID string) error {
+	inspect, err := e.cli.ContainerInspect(ctx, containerID)
 	if err != nil {
-		e.log.WithError(err).Errorf("failed to create network (%s)", defaultNetworkName)
+		e.log.WithError(err).Errorf("failed to get instance %s info", containerID[:12])
 		return err
 	}
-	if nw.Warning != "" {
-		e.log.Warnf(nw.Warning)
+	for name := range inspect.NetworkSettings.Networks {
+		err := e.cli.NetworkDisconnect(ctx, e.networks[name], containerID, true)
+		if err != nil {
+			e.log.WithError(err).Errorf("instance %s failed to disconnect from network %s", containerID[:12], e.networks[name][:12])
+			return err
+		}
 	}
-	e.nid = nw.ID
-	e.log.Debugf("network (%s:%s) created", e.nid[:12], defaultNetworkName)
+	for _, endpointSetting := range endpointSettings {
+		err = e.cli.NetworkConnect(ctx, endpointSetting.NetworkID, containerID, endpointSetting)
+		if err != nil {
+			e.log.WithError(err).Errorf("can not connect instance %s to network %s", containerID[:12], endpointSetting.NetworkID[:12])
+			return err
+		}
+		e.log.Debugf("connect instance %s to network %s", containerID[:12], endpointSetting.NetworkID[:12])
+	}
 	return nil
 }
 
@@ -68,10 +182,16 @@ func (e *dockerEngine) pullImage(name string) error {
 
 func (e *dockerEngine) startContainer(name string, cfg containerConfigs) (string, error) {
 	ctx := context.Background()
-	container, err := e.cli.ContainerCreate(ctx, &cfg.config, &cfg.hostConfig, &cfg.networkConfig, name)
+	container, err := e.cli.ContainerCreate(ctx, &cfg.config, &cfg.hostConfig, nil, name)
 	if err != nil {
 		e.log.WithError(err).Warnf("failed to create container (%s)", name)
 		return "", err
+	}
+	if len(cfg.networkConfig.EndpointsConfig) > 0 {
+		err = e.connectNetworks(ctx, cfg.networkConfig.EndpointsConfig, container.ID)
+		if err != nil {
+			return "", err
+		}
 	}
 	err = e.cli.ContainerStart(ctx, container.ID, types.ContainerStartOptions{})
 	if err != nil {
@@ -94,13 +214,16 @@ func (e *dockerEngine) restartContainer(cid string) error {
 }
 
 func (e *dockerEngine) waitContainer(cid string) error {
+	t := time.Now()
 	ctx := context.Background()
 	statusChan, errChan := e.cli.ContainerWait(ctx, cid, container.WaitConditionNotRunning)
 	select {
 	case err := <-errChan:
+		e.logsContainer(cid, t)
 		e.log.WithError(err).Warnf("failed to wait container (%s)", cid[:12])
 		return err
 	case status := <-statusChan:
+		e.logsContainer(cid, t)
 		e.log.Debugf("container (%s) exit status: %v", cid[:12], status)
 		if status.Error != nil {
 			return fmt.Errorf(status.Error.Message)
@@ -113,7 +236,7 @@ func (e *dockerEngine) waitContainer(cid string) error {
 }
 
 func (e *dockerEngine) stopContainer(cid string) error {
-	e.log.Debugf("to stop container (%s)", cid[:12])
+	e.log.Debugf("container (%s) is stopping", cid[:12])
 
 	ctx := context.Background()
 	err := e.cli.ContainerStop(ctx, cid, &e.grace)
@@ -218,4 +341,34 @@ func (e *dockerEngine) statsContainer(cid string) engine.PartialStats {
 			UsedPercent: UsedPercent,
 		},
 	}
+}
+
+func (e *dockerEngine) logsContainer(cid string, since time.Time) error {
+	ctx := context.Background()
+	r, err := e.cli.ContainerLogs(ctx, cid, types.ContainerLogsOptions{
+		ShowStdout: false,
+		ShowStderr: true, // only read error message
+		Since:      since.Format("2006-01-02T15:04:05"),
+	})
+	if err != nil {
+		e.log.WithError(err).Warnf("failed to log container (%s)", cid[:12])
+		return err
+	}
+	defer r.Close()
+	scanner := bufio.NewScanner(r)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) <= 8 {
+			continue
+		}
+		switch stdcopy.StdType(line[0]) {
+		case stdcopy.Stderr:
+			e.log.Errorf("container (%s) %s", cid[:12], string(line[8:]))
+		case stdcopy.Stdin, stdcopy.Stdout:
+			e.log.Debugf("container (%s) %s", cid[:12], string(line[8:]))
+		default:
+			e.log.Debugf("container (%s) %s", cid[:12], string(line))
+		}
+	}
+	return nil
 }

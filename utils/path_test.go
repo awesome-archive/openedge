@@ -1,6 +1,7 @@
 package utils
 
 import (
+	"io"
 	"io/ioutil"
 	"os"
 	"path"
@@ -54,15 +55,38 @@ func TestPathJoin(t *testing.T) {
 	assert.Equal(t, "/var/db/var/db/a", path.Join("/var/db", "/var/db/a"))
 	assert.Equal(t, "/var/db/var/db/a", path.Join("/var/db", "var/db/a"))
 	assert.Equal(t, "/var/db/a/b", path.Join("/var/db", "a/b/c/./.."))
-	p, err := filepath.Rel("var/db/openedge", "var/db/openedge/vv/v1")
+	p, err := filepath.Rel("var/db/baetyl", "var/db/baetyl/vv/v1")
 	assert.NoError(t, err)
 	assert.Equal(t, "vv/v1", p)
-	p, err = filepath.Rel("var/db/openedge", "var/db/openedge/../../../vv/v1")
+	p, err = filepath.Rel("var/db/baetyl", "var/db/baetyl/../../../vv/v1")
 	assert.NoError(t, err)
 	assert.Equal(t, "../../../vv/v1", p)
 	assert.Equal(t, "../../../vv/v1", path.Clean(p))
-	assert.Equal(t, "vv/v1", path.Join("var/db/openedge", p))
+	assert.Equal(t, "vv/v1", path.Join("var/db/baetyl", p))
 	assert.False(t, path.IsAbs(p))
-	assert.False(t, path.IsAbs("var/db/openedge/./vv/v1"))
-	assert.False(t, path.IsAbs("var/db/openedge/vv/v1"))
+	assert.False(t, path.IsAbs("var/db/baetyl/./vv/v1"))
+	assert.False(t, path.IsAbs("var/db/baetyl/vv/v1"))
+	assert.Equal(t, "/usr/local/bin", path.Join("/usr/local/", path.Join("/", "../../../../bin")))
+	assert.Equal(t, "/mnt/data0", path.Join("/", path.Join("/", "/mnt/data0")))
+}
+
+func TestCreateSymlink(t *testing.T) {
+	dir, err := ioutil.TempDir("", "")
+	assert.NoError(t, err)
+	cwd, err := os.Getwd()
+	assert.NoError(t, err)
+	os.Chdir(dir)
+	filename := "file"
+	f, err := os.Create(filename)
+	assert.NoError(t, err)
+	defer f.Close()
+	content := "test"
+	_, err = io.WriteString(f, content)
+	assert.NoError(t, err)
+	symlink := "symlink"
+	CreateSymlink(filename, symlink)
+	res, err := ioutil.ReadFile(symlink)
+	assert.NoError(t, err)
+	assert.Equal(t, content, string(res))
+	os.Chdir(cwd)
 }

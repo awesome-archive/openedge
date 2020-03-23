@@ -6,10 +6,11 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"syscall"
 	"time"
 
-	"github.com/baidu/openedge/logger"
-	"github.com/baidu/openedge/utils"
+	"github.com/baetyl/baetyl/logger"
+	"github.com/baetyl/baetyl/utils"
 	"github.com/creasty/defaults"
 	"github.com/gorilla/mux"
 )
@@ -95,6 +96,12 @@ func (s *Server) Handle(handle func(Params, []byte) ([]byte, error), method, pat
 
 // Start starts server
 func (s *Server) Start() error {
+	if s.uri.Scheme == "unix" {
+		if err := syscall.Unlink(s.uri.Host); err != nil {
+			s.log.Errorf(err.Error())
+		}
+	}
+
 	l, err := net.Listen(s.uri.Scheme, s.uri.Host)
 	if err != nil {
 		return err

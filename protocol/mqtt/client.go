@@ -9,8 +9,8 @@ import (
 	"github.com/256dpi/gomqtt/client"
 	"github.com/256dpi/gomqtt/packet"
 	"github.com/256dpi/gomqtt/transport"
-	"github.com/baidu/openedge/logger"
-	"github.com/baidu/openedge/utils"
+	"github.com/baetyl/baetyl/logger"
+	"github.com/baetyl/baetyl/utils"
 	"github.com/creasty/defaults"
 	tomb "gopkg.in/tomb.v2"
 )
@@ -35,7 +35,7 @@ func NewClient(cc ClientInfo, handler Handler, log logger.Logger) (*Client, erro
 		log = logger.Global
 	}
 
-	dialer, err := NewDialer(cc.Certificate)
+	dialer, err := NewDialer(cc.Certificate, cc.Timeout)
 	if err != nil {
 		return nil, err
 	}
@@ -106,13 +106,15 @@ func (c *Client) connect() (err error) {
 
 	err = c.connectFuture.Wait(c.config.Timeout)
 	if err != nil {
-		return c.die(err)
+		return c.die(fmt.Errorf("failed to wait connect ack: %s", err.Error()))
 	}
+	c.log.Debugf("connected")
 
 	err = c.subscribeFuture.Wait(c.config.Timeout)
 	if err != nil {
-		return c.die(err)
+		return c.die(fmt.Errorf("failed to wait subscribe ack: %s", err.Error()))
 	}
+	c.log.Debugf("subscribed")
 	return nil
 }
 

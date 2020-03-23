@@ -6,7 +6,7 @@
 /.idea
 /.vscode
 /output*
-/openedge
+/baetyl
 /**/*.zip
 /**/.DS_Store
 /**/libexec
@@ -17,6 +17,9 @@
 /**/debug
 /**/*.log
 /cover*.out
+/cover*.html
 /example/**/*-cert
 /**/processes.history*
 /**/node_modules
+/**/__package
+docs/_build

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/containerd/containerd/platforms"
 	"github.com/shirou/gopsutil/cpu"
 	"github.com/shirou/gopsutil/disk"
 	"github.com/shirou/gopsutil/host"
@@ -26,6 +27,8 @@ type HostInfo struct {
 	Platform        string    `json:"platform,omitempty"`
 	PlatformFamily  string    `json:"platform_family,omitempty"`
 	PlatformVersion string    `json:"platform_version,omitempty"`
+	Architecture    string    `json:"architecture,omitempty"`
+	Variant         string    `json:"variant,omitempty"`
 	KernelVersion   string    `json:"kernel_version,omitempty"`
 	HostID          string    `json:"host_id,omitempty"`
 	Error           string    `json:"error,omitempty"`
@@ -33,7 +36,8 @@ type HostInfo struct {
 
 // GetHostInfo returns host information
 func GetHostInfo() *HostInfo {
-	hi := &HostInfo{Time: time.Now().UTC()}
+	pl := platforms.DefaultSpec()
+	hi := &HostInfo{Time: time.Now().UTC(), Architecture: pl.Architecture, Variant: pl.Variant}
 	raw, err := host.Info()
 	if err != nil {
 		hi.Error = err.Error()
@@ -50,6 +54,17 @@ func GetHostInfo() *HostInfo {
 	hi.KernelVersion = raw.KernelVersion
 	hi.HostID = raw.HostID
 	return hi
+}
+
+// FormatPlatformInfo format a brief platform information
+func (hi *HostInfo) FormatPlatformInfo() string {
+	if hi.OS == "" {
+		return "unknown"
+	} else if hi.Variant == "" {
+		return fmt.Sprintf("%s/%s", hi.OS, hi.Architecture)
+	} else {
+		return fmt.Sprintf("%s/%s/%s", hi.OS, hi.Architecture, hi.Variant)
+	}
 }
 
 // DiskInfo disk information
@@ -178,10 +193,14 @@ func GetNetInfo() *NetInfo {
 
 // CPUInfo CPU information
 type CPUInfo struct {
-	Time        time.Time    `json:"time,omitempty"`
-	UsedPercent float64      `json:"used_percent,omitempty"`
-	CPUs        []PerCPUInfo `json:"cpus,omitempty"`
-	Error       string       `json:"error,omitempty"`
+	Time        time.Time `json:"time,omitempty"`
+	Mhz         float64   `json:"mhz,omitempty"`
+	Cores       int32     `json:"cores,omitempty"`
+	CacheSize   int32     `json:"cache_size,omitempty"`
+	ModelName   string    `json:"model_name,omitempty"`
+	PhysicalID  string    `json:"physical_id,omitempty"`
+	UsedPercent float64   `json:"used_percent,omitempty"`
+	Error       string    `json:"error,omitempty"`
 }
 
 // PerCPUInfo one CPU information
@@ -192,21 +211,26 @@ type PerCPUInfo struct {
 // GetCPUInfo gets CPU information
 func GetCPUInfo() *CPUInfo {
 	ci := &CPUInfo{Time: time.Now().UTC()}
+	info, err := cpu.Info()
+	if err != nil {
+		ci.Error = err.Error()
+		return ci
+	}
 	raw, err := cpu.Percent(0, false)
 	if err != nil {
 		ci.Error = err.Error()
 		return ci
 	}
-	per, err := cpu.Percent(0, true)
-	if err != nil {
-		ci.Error = err.Error()
-		return ci
+	// only get first CPU
+	if len(info) >= 1 {
+		ci.Mhz = info[0].Mhz
+		ci.Cores = info[0].Cores
+		ci.CacheSize = info[0].CacheSize
+		ci.ModelName = info[0].ModelName
+		ci.PhysicalID = info[0].PhysicalID
 	}
-	if len(raw) == 1 {
+	if len(raw) >= 1 {
 		ci.UsedPercent = raw[0]
-	}
-	for _, v := range per {
-		ci.CPUs = append(ci.CPUs, PerCPUInfo{UsedPercent: v})
 	}
 	return ci
 }

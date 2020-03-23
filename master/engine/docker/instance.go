@@ -1,9 +1,9 @@
 package docker
 
 import (
-	"github.com/baidu/openedge/logger"
-	"github.com/baidu/openedge/master/engine"
-	"github.com/baidu/openedge/utils"
+	"github.com/baetyl/baetyl/logger"
+	"github.com/baetyl/baetyl/master/engine"
+	"github.com/baetyl/baetyl/utils"
 )
 
 type attribute struct {
@@ -97,7 +97,7 @@ func (i *dockerInstance) Restart() error {
 }
 
 func (i *dockerInstance) Stop() {
-	i.log.Infof("to stop instance")
+	i.log.Infof("instance is stopping")
 	err := i.service.engine.stopContainer(i.id)
 	if err != nil {
 		i.log.WithError(err).Errorf("failed to stop instance")
@@ -111,7 +111,7 @@ func (i *dockerInstance) Dying() <-chan struct{} {
 }
 
 func (i *dockerInstance) Close() error {
-	i.log.Infof("to close instance")
+	i.log.Infof("instance is closing")
 	i.tomb.Kill(nil)
 	return i.tomb.Wait()
 }

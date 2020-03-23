@@ -3,6 +3,7 @@ package utils
 import (
 	"crypto/md5"
 	"encoding/base64"
+	"fmt"
 	"io"
 	"os"
 )
@@ -74,4 +75,16 @@ func CalculateFileMD5(fn string) (string, error) {
 		return "", err
 	}
 	return base64.StdEncoding.EncodeToString(hasher.Sum(nil)), nil
+}
+
+// CreateSymlink create symlink of target
+func CreateSymlink(target, symlink string) error {
+	if PathExists(symlink) {
+		return nil
+	}
+	err := os.Symlink(target, symlink)
+	if err != nil {
+		return fmt.Errorf("failed to make symlink %s of %s: %s", target, symlink, err.Error())
+	}
+	return nil
 }
