@@ -1,0 +1,10 @@
+node:
+  ca: var/lib/baetyl/node/ca.pem
+  key: var/lib/baetyl/node/client.key
+  cert: var/lib/baetyl/node/client.pem
+httplink:
+  address: "https://192.168.56.1:9005"
+  insecureSkipVerify: true
+logger:
+  level: debug
+  encoding: console
